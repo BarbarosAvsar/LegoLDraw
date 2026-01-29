@@ -405,7 +405,10 @@ globalLightBricks = {
 margin = 5 # Allow 5 degrees either way to compensate for measuring inaccuracies
 globalSlopeAngles = {}
 for part, angles in globalSlopeBricks.items():
-globalSlopeAngles[part] = {(c - margin, c + margin) if not isinstance(c, tuple) else (min(c) - margin, max(c) + margin) for c in angles}
+    globalSlopeAngles[part] = {
+        (c - margin, c + margin) if not isinstance(c, tuple) else (min(c) - margin, max(c) + margin)
+        for c in angles
+    }
 
 # **************************************************************************************
 def internalPrint(message):
