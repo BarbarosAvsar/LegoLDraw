@@ -46,6 +46,7 @@ import itertools
 import operator
 import zipfile
 import tempfile
+import locale
 
 from pprint import pprint
 
@@ -197,6 +198,15 @@ def _set_active_view_layer(scene, view_layer):
         pass
     if hasattr(scene.view_layers, "active"):
         scene.view_layers.active = view_layer
+
+
+def _safe_extract_zip(zip_ref, destination):
+    destination = os.path.realpath(destination)
+    for zinfo in zip_ref.infolist():
+        extracted_path = os.path.realpath(os.path.join(destination, zinfo.filename))
+        if os.path.commonpath([destination, extracted_path]) != destination:
+            raise ValueError("Zip entry outside extraction directory.")
+    zip_ref.extractall(destination)
 
 
 # **************************************************************************************
@@ -1032,25 +1042,27 @@ class FileSystem:
             return
 
     def __checkEncoding(filepath):
-        """Check the encoding of a file for Endian encoding."""
+        """Check the encoding of a file for BOM markers."""
 
         filepath = FileSystem.pathInsensitive(filepath)
 
         # Open it, read just the area containing a possible byte mark
         with open(filepath, "rb") as encode_check:
-            encoding = encode_check.readline(3)
+            header = encode_check.read(4)
 
-        # The file uses UCS-2 (UTF-16) Big Endian encoding
-        if encoding == b"\xfe\xff\x00":
+        # LDraw files should be UTF-8 without BOM; accept BOMs with warnings.
+        if header.startswith(b"\xef\xbb\xbf"):
+            printWarningOnce("LDrawUtf8Bom", "UTF-8 BOM detected; LDraw specifies UTF-8 without BOM.")
+            return "utf_8_sig"
+        if header.startswith(b"\xff\xfe"):
+            printWarningOnce("LDrawUtf16LE", "UTF-16 LE BOM detected; LDraw specifies UTF-8.")
+            return "utf_16_le"
+        if header.startswith(b"\xfe\xff"):
+            printWarningOnce("LDrawUtf16BE", "UTF-16 BE BOM detected; LDraw specifies UTF-8.")
             return "utf_16_be"
 
-        # The file uses UCS-2 (UTF-16) Little Endian
-        elif encoding == b"\xff\xfe0":
-            return "utf_16_le"
-
-        # Use LDraw model standard UTF-8
-        else:
-            return "utf_8"
+        # Default to UTF-8 per LDraw standard.
+        return "utf_8"
 
     def readTextFile(filepath):
         """Read a text file, with various checks for type of encoding"""
@@ -1061,13 +1073,23 @@ class FileSystem:
         if os.path.exists(filepath):
             # Try to read using the suspected encoding
             file_encoding = FileSystem.__checkEncoding(filepath)
-            try:
-                with open(filepath, "rt", encoding=file_encoding) as f_in:
-                    lines = f_in.readlines()
-            except Exception:
-                # If all else fails, read using Latin 1 encoding
-                with open(filepath, "rt", encoding="latin_1") as f_in:
-                    lines = f_in.readlines()
+            encodings = [file_encoding]
+            preferred = locale.getpreferredencoding(False)
+            if preferred and preferred not in encodings:
+                encodings.append(preferred)
+            for fallback in ("cp1252", "latin_1"):
+                if fallback not in encodings:
+                    encodings.append(fallback)
+
+            for encoding in encodings:
+                try:
+                    with open(filepath, "rt", encoding=encoding) as f_in:
+                        lines = f_in.readlines()
+                    break
+                except UnicodeDecodeError:
+                    continue
+                except OSError:
+                    break
 
         return lines
 
@@ -1528,26 +1550,30 @@ class LDrawFile:
                 return False
             filepath = result
 
-        if os.path.splitext(filepath)[1] == ".io":
+        if os.path.splitext(filepath)[1].lower() == ".io":
             # Check if the file is encrypted (password protected)
-            is_encrypted = False
-            zf = zipfile.ZipFile(filepath)
-            for zinfo in zf.infolist():
-                is_encrypted |= zinfo.flag_bits & 0x1
-            if is_encrypted:
-                ShowMessageBox("Oops, this .io file is password protected", "Password protected files are not supported", 'ERROR')
-                return False
+            with zipfile.ZipFile(filepath) as zip_ref:
+                is_encrypted = any(zinfo.flag_bits & 0x1 for zinfo in zip_ref.infolist())
+                if is_encrypted:
+                    ShowMessageBox("Oops, this .io file is password protected", "Password protected files are not supported", 'ERROR')
+                    return False
 
-            # Get a temporary directory. Store the TemporaryDirectory object in Configure so it's scope lasts long enough
-            Configure.tempDir = tempfile.TemporaryDirectory()
-            directory_to_extract_to = Configure.tempDir.name
+                # Get a temporary directory. Store the TemporaryDirectory object in Configure so it's scope lasts long enough
+                Configure.tempDir = tempfile.TemporaryDirectory()
+                directory_to_extract_to = Configure.tempDir.name
 
-            # Decompress to temporary directory
-            with zipfile.ZipFile(filepath, 'r') as zip_ref:
-                zip_ref.extractall(directory_to_extract_to)
+                # Decompress to temporary directory (zip-slip safe)
+                try:
+                    _safe_extract_zip(zip_ref, directory_to_extract_to)
+                except ValueError:
+                    ShowMessageBox("Invalid .io archive contents", "Archive contains unsafe file paths", 'ERROR')
+                    return False
 
             # It's the 'model.ldr' file we want to use
             filepath = os.path.join(directory_to_extract_to, "model.ldr")
+            if not os.path.exists(filepath):
+                ShowMessageBox("Could not find model.ldr in .io file", "Invalid .io format", 'ERROR')
+                return False
 
             # Add the subdirectories of the directory to the search paths, notably 'CustomParts' and it's subdirectories
 
@@ -3505,7 +3531,7 @@ def parseParentsFile(file):
     global macros
 
     # See https://stackoverflow.com/a/53870514
-    number_pattern = "[+-]?((\d+(\.\d*)?)|(\.\d+))"
+    number_pattern = r"[+-]?((\d+(\.\d*)?)|(\.\d+))"
     pattern = "(" + number_pattern + ")(.*)"
     compiled = re.compile(pattern)
 
@@ -3644,7 +3670,7 @@ def setupImplicitParents():
     parentMeshParts = {}        # bare part numbers of the parents
     childMeshParts = {}         # bare part numbers of the children
     parentableMeshes = {}       # interesting children
-    lego_part_pattern = "([A-Za-z]?\d+)($|\D)"
+    lego_part_pattern = r"([A-Za-z]?\d+)($|\D)"
 
     # for each object in the scene
     for obj in bpy.data.objects:
@@ -3852,12 +3878,21 @@ def addModifiers(ob):
 
     # Add edge split modifier to each instance
     if Options.edgeSplit:
-        try:
-            edgeModifier = ob.modifiers.new("Edge Split", type='EDGE_SPLIT')
-            edgeModifier.use_edge_sharp = True
-            edgeModifier.split_angle = math.radians(30.0)
-        except Exception:
-            printWarningOnce("EdgeSplitUnavailable", "Edge Split modifier is unavailable; skipping edge splitting.")
+        use_edge_split_modifier = True
+        if hasattr(ob.data, "use_auto_smooth"):
+            ob.data.use_auto_smooth = True
+            if hasattr(ob.data, "auto_smooth_angle"):
+                ob.data.auto_smooth_angle = math.radians(30.0)
+            if bpy.app.version >= (5, 0, 0):
+                use_edge_split_modifier = False
+
+        if use_edge_split_modifier:
+            try:
+                edgeModifier = ob.modifiers.new("Edge Split", type='EDGE_SPLIT')
+                edgeModifier.use_edge_sharp = True
+                edgeModifier.split_angle = math.radians(30.0)
+            except Exception:
+                printWarningOnce("EdgeSplitUnavailable", "Edge Split modifier is unavailable; skipping edge splitting.")
 
 # **************************************************************************************
 def smoothShadingAndFreestyleEdges(ob):
@@ -4490,18 +4525,19 @@ def setupInstructionsLook():
     _set_render_layer_node_view_layer(transLayerNode, 'TransparentBricks')
 
     zCombine = nodes.get("Z Combine")
-    use_z_combine = False
+    use_depth_combine = False
     if zCombine is None:
-        zCombine = _new_compositor_node(nodes, ["CompositorNodeZcombine"])
-    if zCombine is not None and zCombine.bl_idname == "CompositorNodeZcombine":
-        use_z_combine = True
+        zCombine = _new_compositor_node(nodes, ["CompositorNodeZcombine", "CompositorNodeDepthCombine"])
+    if zCombine is not None and zCombine.bl_idname in ("CompositorNodeZcombine", "CompositorNodeDepthCombine"):
+        use_depth_combine = True
     if zCombine is None:
         zCombine = _new_compositor_node(nodes, ["CompositorNodeAlphaOver", "CompositorNodeMixRGB", "CompositorNodeMix"])
     if zCombine is not None:
         zCombine.name = "Z Combine"
-        if use_z_combine:
+        if use_depth_combine:
             _set_attr_if_exists(zCombine, "use_alpha", True)
             _set_attr_if_exists(zCombine, "use_antialias_z", True)
+            _set_attr_if_exists(zCombine, "use_antialias", True)
         elif zCombine.bl_idname == "CompositorNodeMixRGB":
             zCombine.blend_type = 'MIX'
 
@@ -4544,11 +4580,11 @@ def setupInstructionsLook():
         trans_output = _get_socket(setAlpha.outputs, "Image", 0) or _get_socket(setAlpha.outputs, "Result", 0)
 
     if zCombine is not None:
-        if use_z_combine and zCombine.bl_idname == "CompositorNodeZcombine":
-            _safe_link(links, solid_image, _get_socket(zCombine.inputs, "Image", 0))
-            _safe_link(links, solid_depth, _get_socket(zCombine.inputs, "Z", 1) or _get_socket(zCombine.inputs, "Depth", 1))
-            _safe_link(links, trans_output, _get_socket(zCombine.inputs, "Image", 2))
-            _safe_link(links, trans_depth, _get_socket(zCombine.inputs, "Z", 3) or _get_socket(zCombine.inputs, "Depth", 3))
+        if use_depth_combine and zCombine.bl_idname in ("CompositorNodeZcombine", "CompositorNodeDepthCombine"):
+            _safe_link(links, solid_image, _get_socket(zCombine.inputs, "A", 0) or _get_socket(zCombine.inputs, "Image", 0))
+            _safe_link(links, solid_depth, _get_socket(zCombine.inputs, "Depth A", 1) or _get_socket(zCombine.inputs, "Z", 1) or _get_socket(zCombine.inputs, "Depth", 1))
+            _safe_link(links, trans_output, _get_socket(zCombine.inputs, "B", 2) or _get_socket(zCombine.inputs, "Image", 2))
+            _safe_link(links, trans_depth, _get_socket(zCombine.inputs, "Depth B", 3) or _get_socket(zCombine.inputs, "Z", 3) or _get_socket(zCombine.inputs, "Depth", 3))
         else:
             fac_input = _get_socket(zCombine.inputs, "Fac", 0) or _get_socket(zCombine.inputs, "Factor", 0)
             if fac_input is not None:
@@ -4562,13 +4598,20 @@ def setupInstructionsLook():
                 _safe_link(links, trans_output, _get_socket(zCombine.inputs, "Color2", 2))
 
     if composite is not None:
-        _safe_link(links,
-                   _get_socket(zCombine.outputs, "Image", 0) if zCombine is not None else solid_image,
-                   _get_socket(composite.inputs, "Image", 0))
+        combined_output = solid_image
+        if zCombine is not None:
+            combined_output = (
+                _get_socket(zCombine.outputs, "Result", 0)
+                or _get_socket(zCombine.outputs, "Image", 0)
+                or _get_socket(zCombine.outputs, "Combined", 0)
+            )
+        _safe_link(links, combined_output, _get_socket(composite.inputs, "Image", 0))
 
-    # Blender 3 only: link the Z from the Z Combine to the composite. This is not present in Blender 4+.
-    if use_z_combine and zCombine is not None and composite is not None and bpy.app.version < (4, 0, 0):
-        _safe_link(links, _get_socket(zCombine.outputs, "Depth", 1) or _get_socket(zCombine.outputs, "Z", 1), _get_socket(composite.inputs, "Z", 2))
+    # Blender <4: link depth output from Z Combine where available.
+    if use_depth_combine and zCombine is not None and composite is not None and bpy.app.version < (4, 0, 0):
+        _safe_link(links,
+                   _get_socket(zCombine.outputs, "Depth", 1) or _get_socket(zCombine.outputs, "Z", 1),
+                   _get_socket(composite.inputs, "Z", 2))
 
 
 # **************************************************************************************
