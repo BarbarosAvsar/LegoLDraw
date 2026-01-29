@@ -17,9 +17,13 @@ Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 
 """
 
-import bpy
+try:
+    import bpy
+except ModuleNotFoundError:
+    bpy = None
 
-from . import importldraw
+if bpy is not None:
+    from . import importldraw
 
 bl_info = {
     "name": "Import LDraw",
@@ -35,14 +39,21 @@ bl_info = {
     }
 
 
+def _require_bpy():
+    if bpy is None:
+        raise RuntimeError("Blender's bpy module is required to use this add-on.")
+
+
 def menuImport(self, context):
     """Import menu listing label."""
+    _require_bpy()
     self.layout.operator(importldraw.ImportLDrawOps.bl_idname,
                          text="LDraw (.io/.mpd/.ldr/.l3b/.dat)")
 
 
 def register():
     """Register Menu Listing."""
+    _require_bpy()
     bpy.utils.register_class(importldraw.ImportLDrawOps)
     if hasattr(bpy.types, 'TOPBAR_MT_file_import'):
         # Blender 2.80
@@ -54,6 +65,7 @@ def register():
 
 def unregister():
     """Unregister Menu Listing."""
+    _require_bpy()
     bpy.utils.unregister_class(importldraw.ImportLDrawOps)
     if hasattr(bpy.types, 'TOPBAR_MT_file_import'):
         # Blender 2.80
