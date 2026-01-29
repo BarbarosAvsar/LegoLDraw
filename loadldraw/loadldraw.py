@@ -51,32 +51,49 @@ from pprint import pprint
 
 # **************************************************************************************
 def linkToScene(ob):
-    if bpy.context.collection.objects.find(ob.name) < 0:
-        bpy.context.collection.objects.link(ob)
+    collection = getattr(bpy.context, "collection", None)
+    if collection is None:
+        scene = getattr(bpy.context, "scene", None)
+        collection = getattr(scene, "collection", None) if scene is not None else None
+    if collection is not None and collection.objects.find(ob.name) < 0:
+        collection.objects.link(ob)
 
 # **************************************************************************************
 def linkToCollection(collectionName, ob):
     # Add object to the appropriate collection
     if hasCollections:
-        if bpy.data.collections[collectionName].objects.find(ob.name) < 0:
-            bpy.data.collections[collectionName].objects.link(ob)
+        collection = bpy.data.collections.get(collectionName)
+        if collection is None:
+            collection = bpy.data.collections.new(collectionName)
+            if bpy.context.scene is not None:
+                bpy.context.scene.collection.children.link(collection)
+        if collection.objects.find(ob.name) < 0:
+            collection.objects.link(ob)
     else:
         bpy.data.groups[collectionName].objects.link(ob)
 
 # **************************************************************************************
 def unlinkFromScene(ob):
-    if bpy.context.collection.objects.find(ob.name) >= 0:
-        bpy.context.collection.objects.unlink(ob)
+    collection = getattr(bpy.context, "collection", None)
+    if collection is None:
+        scene = getattr(bpy.context, "scene", None)
+        collection = getattr(scene, "collection", None) if scene is not None else None
+    if collection is not None and collection.objects.find(ob.name) >= 0:
+        collection.objects.unlink(ob)
 
 # **************************************************************************************
 def selectObject(ob):
     ob.select_set(state=True)
-    bpy.context.view_layer.objects.active = ob
+    view_layer = getattr(bpy.context, "view_layer", None)
+    if view_layer is not None:
+        view_layer.objects.active = ob
 
 # **************************************************************************************
 def deselectObject(ob):
     ob.select_set(state=False)
-    bpy.context.view_layer.objects.active = None
+    view_layer = getattr(bpy.context, "view_layer", None)
+    if view_layer is not None:
+        view_layer.objects.active = None
 
 # **************************************************************************************
 def addPlane(location, size):
@@ -110,6 +127,76 @@ def ShowMessageBox(message = "", title = "Message Box", icon = 'INFO'):
         self.layout.label(text=message)
 
     bpy.context.window_manager.popup_menu(draw, title = title, icon = icon)
+
+
+# **************************************************************************************
+# Helpers for API compatibility (Blender 2.8+ through 5.x)
+def _set_attr_if_exists(obj, attr, value):
+    if hasattr(obj, attr):
+        setattr(obj, attr, value)
+        return True
+    return False
+
+
+def _view_layer_update():
+    view_layer = getattr(bpy.context, "view_layer", None)
+    if view_layer is not None and hasattr(view_layer, "update"):
+        view_layer.update()
+        return
+    get_depsgraph = getattr(bpy.context, "evaluated_depsgraph_get", None)
+    if callable(get_depsgraph):
+        get_depsgraph()
+
+
+def _get_socket(sockets, name, index):
+    if index is not None and len(sockets) > index:
+        socket_by_index = sockets[index]
+        if name is None or socket_by_index.name == name:
+            return socket_by_index
+    if name is not None and name in sockets:
+        return sockets[name]
+    if index is not None and len(sockets) > index:
+        return sockets[index]
+    return None
+
+
+def _safe_link(links, from_socket, to_socket):
+    if from_socket is not None and to_socket is not None:
+        links.new(from_socket, to_socket)
+
+
+def _new_compositor_node(nodes, type_names):
+    for type_name in type_names:
+        try:
+            return nodes.new(type_name)
+        except Exception:
+            continue
+    return None
+
+
+def _set_render_layer_node_view_layer(node, layer_name):
+    if node is None:
+        return
+    if hasattr(node, "layer"):
+        node.layer = layer_name
+    elif hasattr(node, "view_layer"):
+        node.view_layer = layer_name
+
+
+def _set_view_layer_use(view_layer, enabled):
+    if view_layer is not None and hasattr(view_layer, "use"):
+        view_layer.use = enabled
+
+
+def _set_active_view_layer(scene, view_layer):
+    try:
+        if bpy.context.window is not None and hasattr(bpy.context.window, "view_layer"):
+            bpy.context.window.view_layer = view_layer
+            return
+    except Exception:
+        pass
+    if hasattr(scene.view_layers, "active"):
+        scene.view_layers.active = view_layer
 
 
 # **************************************************************************************
@@ -318,7 +405,7 @@ globalLightBricks = {
 margin = 5 # Allow 5 degrees either way to compensate for measuring inaccuracies
 globalSlopeAngles = {}
 for part, angles in globalSlopeBricks.items():
-    globalSlopeAngles[part] = {(c-margin, c+margin) if type(c) is not tuple else (min(c)-margin,max(c)+margin) for c in angles}
+globalSlopeAngles[part] = {(c - margin, c + margin) if not isinstance(c, tuple) else (min(c) - margin, max(c) + margin) for c in angles}
 
 # **************************************************************************************
 def internalPrint(message):
@@ -974,7 +1061,7 @@ class FileSystem:
             try:
                 with open(filepath, "rt", encoding=file_encoding) as f_in:
                     lines = f_in.readlines()
-            except:
+            except Exception:
                 # If all else fails, read using Latin 1 encoding
                 with open(filepath, "rt", encoding="latin_1") as f_in:
                     lines = f_in.readlines()
@@ -1230,7 +1317,7 @@ class LDrawNode:
         self.groupNames     = groupNames.copy()
 
     def look_at(obj_camera, target, up_vector):
-        bpy.context.view_layer.update()
+        _view_layer_update()
 
         loc_camera = obj_camera.matrix_world.to_translation()
 
@@ -1808,12 +1895,12 @@ class BlenderMaterials:
 
         if Options.instructionsLook:
             material.blend_method = 'BLEND'
-            material.show_transparent_back = False
+            _set_attr_if_exists(material, "show_transparent_back", False)
 
             if col is not None:
                 # Dark colours have white lines
                 if LegoColours.isDark(colour):
-                    material.line_color = (1.0, 1.0, 1.0, 1.0)
+                    _set_attr_if_exists(material, "line_color", (1.0, 1.0, 1.0, 1.0))
 
         nodes = material.node_tree.nodes
         links = material.node_tree.links
@@ -3495,7 +3582,7 @@ def parseParentsFile(file):
                         # Got three numbers for an attach point
                         try:
                             attachPoint = (float(number1), float(number2), float(number3))
-                        except:
+                        except Exception:
                             attachPoint = None
                         if attachPoint:
                             # Attach point
@@ -3528,7 +3615,7 @@ def setupImplicitParents():
     if not partsHierarchy:
         return
 
-    bpy.context.view_layer.update()
+    _view_layer_update()
 
     # create a set of the parent parts and a set of child parts from the partsHierarchy
     parentParts = set()
@@ -3762,9 +3849,12 @@ def addModifiers(ob):
 
     # Add edge split modifier to each instance
     if Options.edgeSplit:
-        edgeModifier = ob.modifiers.new("Edge Split", type='EDGE_SPLIT')
-        edgeModifier.use_edge_sharp = True
-        edgeModifier.split_angle = math.radians(30.0)
+        try:
+            edgeModifier = ob.modifiers.new("Edge Split", type='EDGE_SPLIT')
+            edgeModifier.use_edge_sharp = True
+            edgeModifier.split_angle = math.radians(30.0)
+        except Exception:
+            printWarningOnce("EdgeSplitUnavailable", "Edge Split modifier is unavailable; skipping edge splitting.")
 
 # **************************************************************************************
 def smoothShadingAndFreestyleEdges(ob):
@@ -3791,7 +3881,8 @@ def smoothShadingAndFreestyleEdges(ob):
         # Mark all sharp edges as freestyle edges
         me = bpy.context.object.data
         for e in me.edges:
-            e.use_freestyle_mark = e.use_edge_sharp
+            if hasattr(e, "use_freestyle_mark"):
+                e.use_freestyle_mark = e.use_edge_sharp
 
     # Deselect object
     deselectObject(ob)
@@ -3852,20 +3943,27 @@ def createBlenderObjectsFromNode(node,
                     # Blender 3.4 removed 'ob.data.use_customdata_edge_bevel', so this seems to be the alternative:
                     # See https://blender.stackexchange.com/a/270716
                     area_type = 'VIEW_3D' # change this to use the correct Area Type context you want to process in
-                    areas  = [area for area in bpy.context.window.screen.areas if area.type == area_type]
+                    window = getattr(bpy.context, "window", None)
+                    screen = getattr(window, "screen", None) if window is not None else None
+                    areas = [area for area in (screen.areas if screen is not None else []) if area.type == area_type]
 
                     if len(areas) <= 0:
-                        raise Exception(f"Make sure an Area of type {area_type} is open or visible on your screen!")
-                    selectObject(ob)
-                    bpy.ops.object.mode_set(mode='EDIT')
+                        printWarningOnce("BevelWeightContext", f"No {area_type} area available; skipping bevel weight setup.")
+                    else:
+                        region = next((r for r in areas[0].regions if r.type == 'WINDOW'), None)
+                        if region is None:
+                            printWarningOnce("BevelWeightRegion", "No VIEW_3D WINDOW region available; skipping bevel weight setup.")
+                        else:
+                            selectObject(ob)
+                            bpy.ops.object.mode_set(mode='EDIT')
 
-                    with bpy.context.temp_override(
-                        window=bpy.context.window,
-                        area=areas[0],
-                        regions=[region for region in areas[0].regions if region.type == 'WINDOW'][0],
-                        screen=bpy.context.window.screen):
-                        bpy.ops.mesh.customdata_bevel_weight_edge_add()
-                    bpy.ops.object.mode_set(mode='OBJECT')
+                            with bpy.context.temp_override(
+                                window=window,
+                                area=areas[0],
+                                region=region,
+                                screen=screen):
+                                bpy.ops.mesh.customdata_bevel_weight_edge_add()
+                            bpy.ops.object.mode_set(mode='OBJECT')
 
                     unlinkFromScene(ob)
 
@@ -3943,11 +4041,14 @@ def createBlenderObjectsFromNode(node,
             bm.free()
 
             # Show the sharp edges in Edit Mode
-            for area in bpy.context.screen.areas:  # iterate through areas in current screen
-                if area.type == 'VIEW_3D':
-                    for space in area.spaces:  # iterate through spaces in current VIEW_3D area
-                        if space.type == 'VIEW_3D':  # check if space is a 3D view
-                            space.overlay.show_edge_sharp = True
+            screen = getattr(bpy.context, "screen", None)
+            if screen is not None:
+                for area in screen.areas:  # iterate through areas in current screen
+                    if area.type == 'VIEW_3D':
+                        for space in area.spaces:  # iterate through spaces in current VIEW_3D area
+                            if space.type == 'VIEW_3D':  # check if space is a 3D view
+                                if hasattr(space, "overlay") and hasattr(space.overlay, "show_edge_sharp"):
+                                    space.overlay.show_edge_sharp = True
 
             # Scale for Gaps
             if Options.gaps and node.file.isPart:
@@ -4003,7 +4104,7 @@ def createBlenderObjectsFromNode(node,
 
         # Hide selection of studs
         if node.file.isStud:
-            ob.hide_select = True
+            _set_attr_if_exists(ob, "hide_select", True)
 
         # Add bevel and edge split modifiers as needed
         if mesh:
@@ -4042,7 +4143,9 @@ def setupLineset(lineset, thickness, group):
     lineset.edge_type_combination = 'OR'
     lineset.edge_type_negation = 'INCLUSIVE'
     lineset.select_by_collection = True
-    lineset.collection = bpy.data.collections[bpy.data.collections.find(group)]
+    collection = bpy.data.collections.get(group)
+    if collection is not None:
+        lineset.collection = collection
 
     # Set line color
     lineset.linestyle.color = (0.0, 0.0, 0.0)
@@ -4064,12 +4167,18 @@ def setupLineset(lineset, thickness, group):
 def setupRealisticLook():
     scene = bpy.context.scene
     render = scene.render
+    cycles = getattr(scene, "cycles", None)
 
     # Use cycles render
-    scene.render.engine = 'CYCLES'
+    try:
+        scene.render.engine = 'CYCLES'
+    except Exception:
+        pass
 
     # Add environment texture for world
     if Options.addWorldEnvironmentTexture:
+        if scene.world is None:
+            scene.world = bpy.data.worlds.new("World")
         scene.world.use_nodes = True
         nodes = scene.world.node_tree.nodes
         links = scene.world.node_tree.links
@@ -4087,22 +4196,25 @@ def setupRealisticLook():
             background = nodes["Background"]
             links.new(env_tex.outputs[0],background.inputs[0])
     else:
+        if scene.world is None:
+            scene.world = bpy.data.worlds.new("World")
         scene.world.color = (1.0, 1.0, 1.0)
 
     if Options.setRenderSettings:
         useDenoising(scene, True)
 
-        if (scene.cycles.samples < 400):
-            scene.cycles.samples = 400
-        if (scene.cycles.diffuse_bounces < 20):
-            scene.cycles.diffuse_bounces = 20
-        if (scene.cycles.glossy_bounces < 20):
-            scene.cycles.glossy_bounces = 20
+        if cycles is not None:
+            if (cycles.samples < 400):
+                cycles.samples = 400
+            if (cycles.diffuse_bounces < 20):
+                cycles.diffuse_bounces = 20
+            if (cycles.glossy_bounces < 20):
+                cycles.glossy_bounces = 20
 
     # Check layer names to see if we were previously rendering instructions and change settings back.
     layerNames = getLayerNames(scene)
     if ("SolidBricks" in layerNames) or ("TransparentBricks" in layerNames):
-        render.use_freestyle = False
+        _set_attr_if_exists(render, "use_freestyle", False)
 
         # Change camera back to Perspective
         if scene.camera is not None:
@@ -4113,14 +4225,15 @@ def setupRealisticLook():
             render.alpha_mode = 'SKY'
 
         # Turn off cycles transparency
-        scene.cycles.film_transparent = False
+        if cycles is not None:
+            cycles.film_transparent = False
 
         # Get the render/view layers we are interested in:
         layers = getLayers(scene)
 
         # If we have previously added render layers for instructions look, re-enable any disabled render layers
         for i in range(len(layers)):
-            layers[i].use = True
+            _set_view_layer_use(layers[i], True)
 
         # Un-name SolidBricks and TransparentBricks layers
         if "SolidBricks" in layerNames:
@@ -4131,7 +4244,7 @@ def setupRealisticLook():
 
         # Re-enable all layers
         for i in range(len(layers)):
-            layers[i].use = True
+            _set_view_layer_use(layers[i], True)
 
         # Create Compositing Nodes
         scene.use_nodes = True
@@ -4148,13 +4261,20 @@ def setupRealisticLook():
             scene.node_tree.nodes.remove(scene.node_tree.nodes["Z Combine"])
 
         # Set up standard link from Render Layers to Composite
-        if "Render Layers" in nodeNames:
-            if "Composite" in nodeNames:
-                rl = scene.node_tree.nodes["Render Layers"]
-                zCombine = scene.node_tree.nodes["Composite"]
-
-                links = scene.node_tree.links
-                links.new(rl.outputs[0], zCombine.inputs[0])
+        nodes = scene.node_tree.nodes
+        links = scene.node_tree.links
+        render_layer_node = None
+        for node in nodes:
+            if node.bl_idname in ("CompositorNodeRLayers", "CompositorNodeRenderLayers"):
+                render_layer_node = node
+                break
+        composite = nodes.get("Composite")
+        if composite is None:
+            composite = nodes.new('CompositorNodeComposite')
+        if render_layer_node is not None and composite is not None:
+            _safe_link(links,
+                       _get_socket(render_layer_node.outputs, "Image", 0),
+                       _get_socket(composite.inputs, "Image", 0))
 
     removeCollection('Black Edged Bricks Collection')
     removeCollection('White Edged Bricks Collection')
@@ -4184,12 +4304,13 @@ def createCollection(scene, name):
 def setupInstructionsLook():
     scene = bpy.context.scene
     render = scene.render
-    render.use_freestyle = True
+    cycles = getattr(scene, "cycles", None)
+    _set_attr_if_exists(render, "use_freestyle", True)
 
     # Use Blender Eevee (or Eevee Next) for instructions look
     try:
         render.engine = 'BLENDER_EEVEE'
-    except:
+    except Exception:
         render.engine = 'BLENDER_EEVEE_NEXT'
 
     # Change camera to Orthographic
@@ -4201,12 +4322,13 @@ def setupInstructionsLook():
         render.alpha_mode = 'TRANSPARENT'
 
     # Turn on cycles transparency
-    scene.cycles.film_transparent = True
+    if cycles is not None:
+        cycles.film_transparent = True
 
     # Increase max number of transparency bounces to at least 80
     # This avoids artefacts when multiple transparent objects are behind each other
-    if scene.cycles.transparent_max_bounces < 80:
-        scene.cycles.transparent_max_bounces = 80
+    if cycles is not None and cycles.transparent_max_bounces < 80:
+        cycles.transparent_max_bounces = 80
 
     # Add collections / groups, if not already present
     if hasCollections:
@@ -4224,28 +4346,35 @@ def setupInstructionsLook():
     layers = getLayers(scene)
 
     # Remember current view layer
-    current_view_layer = bpy.context.view_layer
+    current_view_layer = getattr(bpy.context, "view_layer", None)
 
     # Add layers as needed
     layerNames = list(map((lambda x: x.name), layers))
     if "SolidBricks" not in layerNames:
-        bpy.ops.scene.view_layer_add()
-
-        layers[-1].name = "SolidBricks"
-        layers[-1].use = True
+        if hasattr(layers, "new"):
+            new_layer = layers.new("SolidBricks")
+        else:
+            bpy.ops.scene.view_layer_add()
+            new_layer = layers[-1]
+            new_layer.name = "SolidBricks"
+        _set_view_layer_use(new_layer, True)
         layerNames.append("SolidBricks")
     solidLayer = layerNames.index("SolidBricks")
 
     if "TransparentBricks" not in layerNames:
-        bpy.ops.scene.view_layer_add()
-
-        layers[-1].name = "TransparentBricks"
-        layers[-1].use = True
+        if hasattr(layers, "new"):
+            new_layer = layers.new("TransparentBricks")
+        else:
+            bpy.ops.scene.view_layer_add()
+            new_layer = layers[-1]
+            new_layer.name = "TransparentBricks"
+        _set_view_layer_use(new_layer, True)
         layerNames.append("TransparentBricks")
     transLayer = layerNames.index("TransparentBricks")
 
     # Restore current view layer
-    bpy.context.window.view_layer = current_view_layer
+    if current_view_layer is not None:
+        _set_active_view_layer(scene, current_view_layer)
 
     # Use Z layer (defaults to off in Blender 3.5.1)
     if hasattr(layers[transLayer], "use_pass_z"):
@@ -4256,10 +4385,10 @@ def setupInstructionsLook():
     # Disable any render/view layers that are not needed
     for i in range(len(layers)):
         if i not in [solidLayer, transLayer]:
-            layers[i].use = False
+            _set_view_layer_use(layers[i], False)
 
-    layers[solidLayer].use = True
-    layers[transLayer].use = True
+    _set_view_layer_use(layers[solidLayer], True)
+    _set_view_layer_use(layers[transLayer], True)
 
     # Include or exclude collections for each layer
     for collection in layers[solidLayer].layer_collection.children:
@@ -4290,7 +4419,7 @@ def setupInstructionsLook():
                 linkToCollection('Solid Bricks Collection', object)
 
             # Add object to the appropriate group
-            if object.data != None:
+            if object.data is not None:
                 colour = object.data.materials[0].diffuse_color
 
                 # Dark colours have white lines
@@ -4299,89 +4428,144 @@ def setupInstructionsLook():
                 else:
                     linkToCollection('Black Edged Bricks Collection', object)
 
-    # Find or create linesets
-    solidBlackLineset = None
-    solidWhiteLineset = None
-    transBlackLineset = None
-    transWhiteLineset = None
+    # Find or create linesets (Freestyle may be unavailable in newer Blender builds)
+    if hasattr(layers[solidLayer], "freestyle_settings") and hasattr(layers[transLayer], "freestyle_settings"):
+        solidBlackLineset = None
+        solidWhiteLineset = None
+        transBlackLineset = None
+        transWhiteLineset = None
 
-    for lineset in layers[solidLayer].freestyle_settings.linesets:
-        if lineset.name == "LegoSolidBlackLines":
-            solidBlackLineset = lineset
-        if lineset.name == "LegoSolidWhiteLines":
-            solidWhiteLineset = lineset
+        for lineset in layers[solidLayer].freestyle_settings.linesets:
+            if lineset.name == "LegoSolidBlackLines":
+                solidBlackLineset = lineset
+            if lineset.name == "LegoSolidWhiteLines":
+                solidWhiteLineset = lineset
 
-    for lineset in layers[transLayer].freestyle_settings.linesets:
-        if lineset.name == "LegoTransBlackLines":
-            transBlackLineset = lineset
-        if lineset.name == "LegoTransWhiteLines":
-            transWhiteLineset = lineset
+        for lineset in layers[transLayer].freestyle_settings.linesets:
+            if lineset.name == "LegoTransBlackLines":
+                transBlackLineset = lineset
+            if lineset.name == "LegoTransWhiteLines":
+                transWhiteLineset = lineset
 
-    if solidBlackLineset == None:
-        layers[solidLayer].freestyle_settings.linesets.new("LegoSolidBlackLines")
-        solidBlackLineset = layers[solidLayer].freestyle_settings.linesets[-1]
-        setupLineset(solidBlackLineset, 2.25, 'Black Edged Bricks Collection')
-    if solidWhiteLineset == None:
-        layers[solidLayer].freestyle_settings.linesets.new("LegoSolidWhiteLines")
-        solidWhiteLineset = layers[solidLayer].freestyle_settings.linesets[-1]
-        setupLineset(solidWhiteLineset, 2, 'White Edged Bricks Collection')
-    if transBlackLineset == None:
-        layers[transLayer].freestyle_settings.linesets.new("LegoTransBlackLines")
-        transBlackLineset = layers[transLayer].freestyle_settings.linesets[-1]
-        setupLineset(transBlackLineset, 2.25, 'Black Edged Bricks Collection')
-    if transWhiteLineset == None:
-        layers[transLayer].freestyle_settings.linesets.new("LegoTransWhiteLines")
-        transWhiteLineset = layers[transLayer].freestyle_settings.linesets[-1]
-        setupLineset(transWhiteLineset, 2, 'White Edged Bricks Collection')
+        if solidBlackLineset is None:
+            layers[solidLayer].freestyle_settings.linesets.new("LegoSolidBlackLines")
+            solidBlackLineset = layers[solidLayer].freestyle_settings.linesets[-1]
+            setupLineset(solidBlackLineset, 2.25, 'Black Edged Bricks Collection')
+        if solidWhiteLineset is None:
+            layers[solidLayer].freestyle_settings.linesets.new("LegoSolidWhiteLines")
+            solidWhiteLineset = layers[solidLayer].freestyle_settings.linesets[-1]
+            setupLineset(solidWhiteLineset, 2, 'White Edged Bricks Collection')
+        if transBlackLineset is None:
+            layers[transLayer].freestyle_settings.linesets.new("LegoTransBlackLines")
+            transBlackLineset = layers[transLayer].freestyle_settings.linesets[-1]
+            setupLineset(transBlackLineset, 2.25, 'Black Edged Bricks Collection')
+        if transWhiteLineset is None:
+            layers[transLayer].freestyle_settings.linesets.new("LegoTransWhiteLines")
+            transWhiteLineset = layers[transLayer].freestyle_settings.linesets[-1]
+            setupLineset(transWhiteLineset, 2, 'White Edged Bricks Collection')
+    else:
+        printWarningOnce("FreestyleUnavailable", "Freestyle settings are unavailable; skipping line styling for instructions look.")
 
     # Create Compositing Nodes
     scene.use_nodes = True
 
-    if "Solid" in scene.node_tree.nodes:
-        solidLayer = scene.node_tree.nodes["Solid"]
-    else:
-        solidLayer = scene.node_tree.nodes.new('CompositorNodeRLayers')
-        solidLayer.name = "Solid"
-    solidLayer.layer = 'SolidBricks'
-
-    if "Trans" in scene.node_tree.nodes:
-        transLayer = scene.node_tree.nodes["Trans"]
-    else:
-        transLayer = scene.node_tree.nodes.new('CompositorNodeRLayers')
-        transLayer.name = "Trans"
-    transLayer.layer = 'TransparentBricks'
-
-    if "Z Combine" in scene.node_tree.nodes:
-        zCombine = scene.node_tree.nodes["Z Combine"]
-    else:
-        zCombine = scene.node_tree.nodes.new('CompositorNodeZcombine')
-    zCombine.use_alpha = True
-    zCombine.use_antialias_z = True
-
-    if "Set Alpha" in scene.node_tree.nodes:
-        setAlpha = scene.node_tree.nodes["Set Alpha"]
-    else:
-        setAlpha = scene.node_tree.nodes.new('CompositorNodeSetAlpha')
-    setAlpha.inputs[1].default_value = 0.75
-
-    composite = scene.node_tree.nodes["Composite"]
-    composite.location = (950, 400)
-    zCombine.location = (750, 500)
-    transLayer.location = (300, 300)
-    solidLayer.location = (300, 600)
-    setAlpha.location = (580, 370)
-
+    nodes = scene.node_tree.nodes
     links = scene.node_tree.links
-    links.new(solidLayer.outputs[0], zCombine.inputs[0])
-    links.new(solidLayer.outputs[2], zCombine.inputs[1])
-    links.new(transLayer.outputs[0], setAlpha.inputs[0])
-    links.new(setAlpha.outputs[0], zCombine.inputs[2])
-    links.new(transLayer.outputs[2], zCombine.inputs[3])
-    links.new(zCombine.outputs[0], composite.inputs[0])
 
-    # Blender 3 only: link the Z from the Z Combine to the composite. This is not present in Blender 4.
-    if bpy.app.version < (4, 0, 0):
-        links.new(zCombine.outputs[1], composite.inputs[2])
+    solidLayerNode = nodes.get("Solid")
+    if solidLayerNode is None:
+        solidLayerNode = _new_compositor_node(nodes, ["CompositorNodeRLayers", "CompositorNodeRenderLayers"])
+        if solidLayerNode is not None:
+            solidLayerNode.name = "Solid"
+    _set_render_layer_node_view_layer(solidLayerNode, 'SolidBricks')
+
+    transLayerNode = nodes.get("Trans")
+    if transLayerNode is None:
+        transLayerNode = _new_compositor_node(nodes, ["CompositorNodeRLayers", "CompositorNodeRenderLayers"])
+        if transLayerNode is not None:
+            transLayerNode.name = "Trans"
+    _set_render_layer_node_view_layer(transLayerNode, 'TransparentBricks')
+
+    zCombine = nodes.get("Z Combine")
+    use_z_combine = False
+    if zCombine is None:
+        zCombine = _new_compositor_node(nodes, ["CompositorNodeZcombine"])
+    if zCombine is not None and zCombine.bl_idname == "CompositorNodeZcombine":
+        use_z_combine = True
+    if zCombine is None:
+        zCombine = _new_compositor_node(nodes, ["CompositorNodeAlphaOver", "CompositorNodeMixRGB", "CompositorNodeMix"])
+    if zCombine is not None:
+        zCombine.name = "Z Combine"
+        if use_z_combine:
+            _set_attr_if_exists(zCombine, "use_alpha", True)
+            _set_attr_if_exists(zCombine, "use_antialias_z", True)
+        elif zCombine.bl_idname == "CompositorNodeMixRGB":
+            zCombine.blend_type = 'MIX'
+
+    setAlpha = nodes.get("Set Alpha")
+    if setAlpha is None:
+        setAlpha = _new_compositor_node(nodes, ["CompositorNodeSetAlpha"])
+        if setAlpha is not None:
+            setAlpha.name = "Set Alpha"
+    if setAlpha is not None:
+        alpha_input = _get_socket(setAlpha.inputs, "Alpha", 1)
+        if alpha_input is not None:
+            alpha_input.default_value = 0.75
+
+    composite = nodes.get("Composite")
+    if composite is None:
+        composite = nodes.new('CompositorNodeComposite')
+    if composite is not None:
+        composite.location = (950, 400)
+    if zCombine is not None:
+        zCombine.location = (750, 500)
+    if transLayerNode is not None:
+        transLayerNode.location = (300, 300)
+    if solidLayerNode is not None:
+        solidLayerNode.location = (300, 600)
+    if setAlpha is not None:
+        setAlpha.location = (580, 370)
+
+    solid_image = _get_socket(solidLayerNode.outputs, "Image", 0) if solidLayerNode is not None else None
+    solid_depth = _get_socket(solidLayerNode.outputs, "Depth", 2) if solidLayerNode is not None else None
+    if solid_depth is None and solidLayerNode is not None:
+        solid_depth = _get_socket(solidLayerNode.outputs, "Z", 2)
+    trans_image = _get_socket(transLayerNode.outputs, "Image", 0) if transLayerNode is not None else None
+    trans_depth = _get_socket(transLayerNode.outputs, "Depth", 2) if transLayerNode is not None else None
+    if trans_depth is None and transLayerNode is not None:
+        trans_depth = _get_socket(transLayerNode.outputs, "Z", 2)
+
+    trans_output = trans_image
+    if setAlpha is not None:
+        _safe_link(links, trans_image, _get_socket(setAlpha.inputs, "Image", 0))
+        trans_output = _get_socket(setAlpha.outputs, "Image", 0) or _get_socket(setAlpha.outputs, "Result", 0)
+
+    if zCombine is not None:
+        if use_z_combine and zCombine.bl_idname == "CompositorNodeZcombine":
+            _safe_link(links, solid_image, _get_socket(zCombine.inputs, "Image", 0))
+            _safe_link(links, solid_depth, _get_socket(zCombine.inputs, "Z", 1) or _get_socket(zCombine.inputs, "Depth", 1))
+            _safe_link(links, trans_output, _get_socket(zCombine.inputs, "Image", 2))
+            _safe_link(links, trans_depth, _get_socket(zCombine.inputs, "Z", 3) or _get_socket(zCombine.inputs, "Depth", 3))
+        else:
+            fac_input = _get_socket(zCombine.inputs, "Fac", 0) or _get_socket(zCombine.inputs, "Factor", 0)
+            if fac_input is not None:
+                fac_input.default_value = 1.0
+
+            if zCombine.bl_idname == "CompositorNodeAlphaOver":
+                _safe_link(links, solid_image, _get_socket(zCombine.inputs, "Image", 1))
+                _safe_link(links, trans_output, _get_socket(zCombine.inputs, "Image", 2))
+            else:
+                _safe_link(links, solid_image, _get_socket(zCombine.inputs, "Color1", 1))
+                _safe_link(links, trans_output, _get_socket(zCombine.inputs, "Color2", 2))
+
+    if composite is not None:
+        _safe_link(links,
+                   _get_socket(zCombine.outputs, "Image", 0) if zCombine is not None else solid_image,
+                   _get_socket(composite.inputs, "Image", 0))
+
+    # Blender 3 only: link the Z from the Z Combine to the composite. This is not present in Blender 4+.
+    if use_z_combine and zCombine is not None and composite is not None and bpy.app.version < (4, 0, 0):
+        _safe_link(links, _get_socket(zCombine.outputs, "Depth", 1) or _get_socket(zCombine.outputs, "Z", 1), _get_socket(composite.inputs, "Z", 2))
 
 
 # **************************************************************************************
@@ -4389,7 +4573,7 @@ def iterateCameraPosition(camera, render, vcentre3d, moveCamera):
 
     global globalPoints
 
-    bpy.context.view_layer.update()
+    _view_layer_update()
 
     minX = sys.float_info.max
     maxX = -sys.float_info.max
@@ -4533,6 +4717,7 @@ def loadFromFile(context, filename, isFullFilepath=True):
     global globalCamerasToAdd
     global globalContext
     global globalScaleFactor
+    global globalWeldDistance
 
     # Set global scale factor
     # -----------------------
@@ -4721,13 +4906,17 @@ def loadFromFile(context, filename, isFullFilepath=True):
 
         # Find the (first) 3D View, then set the view's 'look at' and 'distance'
         # Note: Not a camera object, but the point of view in the UI.
-        areas = [area for area in bpy.context.window.screen.areas if area.type == 'VIEW_3D']
+        window = getattr(bpy.context, "window", None)
+        screen = getattr(window, "screen", None) if window is not None else None
+        areas = [area for area in (screen.areas if screen is not None else []) if area.type == 'VIEW_3D']
         if len(areas) > 0:
             area = areas[0]
-            with bpy.context.temp_override(area=area):
-                view3d = bpy.context.space_data
-                view3d.region_3d.view_location = boundingBoxCentre      # Where to look at
-                view3d.region_3d.view_distance = boundingBoxDistance    # How far from target
+            region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+            if region is not None:
+                with bpy.context.temp_override(area=area, region=region):
+                    view3d = bpy.context.space_data
+                    view3d.region_3d.view_location = boundingBoxCentre      # Where to look at
+                    view3d.region_3d.view_distance = boundingBoxDistance    # How far from target
 
     # Get existing object names
     sceneObjectNames = [x.name for x in scene.objects]
