@@ -2128,12 +2128,38 @@ class BlenderMaterials:
         return node
 
     def __nodeSeparateHSV(nodes, x, y):
-        node = nodes.new('ShaderNodeSeparateHSV')
+        node = None
+        for node_type in ('ShaderNodeSeparateHSV', 'ShaderNodeSeparateColor'):
+            try:
+                node = nodes.new(node_type)
+                break
+            except Exception:
+                continue
+        if node is None:
+            raise RuntimeError("Separate HSV node not available in this Blender version.")
+        if hasattr(node, "mode"):
+            try:
+                node.mode = 'HSV'
+            except Exception:
+                pass
         node.location = x, y
         return node
 
     def __nodeCombineHSV(nodes, x, y):
-        node = nodes.new('ShaderNodeCombineHSV')
+        node = None
+        for node_type in ('ShaderNodeCombineHSV', 'ShaderNodeCombineColor'):
+            try:
+                node = nodes.new(node_type)
+                break
+            except Exception:
+                continue
+        if node is None:
+            raise RuntimeError("Combine HSV node not available in this Blender version.")
+        if hasattr(node, "mode"):
+            try:
+                node.mode = 'HSV'
+            except Exception:
+                pass
         node.location = x, y
         return node
 
@@ -3092,17 +3118,26 @@ class BlenderMaterials:
                 element.color = (1.118, 1.118, 1.118, 1)
 
                 # link nodes together
-                group.links.new(node_input.outputs['Color'], node_sep_hsv.inputs['Color'])
+                sep_color_in = _get_socket(node_sep_hsv.inputs, 'Color', 0)
+                sep_h_out = _get_socket(node_sep_hsv.outputs, 'H', 0)
+                sep_s_out = _get_socket(node_sep_hsv.outputs, 'S', 1)
+                sep_v_out = _get_socket(node_sep_hsv.outputs, 'V', 2)
+                com_h_in = _get_socket(node_com_hsv.inputs, 'H', 0)
+                com_s_in = _get_socket(node_com_hsv.inputs, 'S', 1)
+                com_v_in = _get_socket(node_com_hsv.inputs, 'V', 2)
+                com_color_out = _get_socket(node_com_hsv.outputs, 'Color', 0)
+
+                _safe_link(group.links, node_input.outputs['Color'], sep_color_in)
                 group.links.new(node_input.outputs['Normal'], node_principled.inputs['Normal'])
-                group.links.new(node_sep_hsv.outputs['H'], node_com_hsv.inputs['H'])
-                group.links.new(node_sep_hsv.outputs['S'], node_com_hsv.inputs['S'])
-                group.links.new(node_sep_hsv.outputs['V'], node_multiply.inputs[0])
-                group.links.new(node_com_hsv.outputs['Color'], node_principled.inputs['Base Color'])
-                group.links.new(node_com_hsv.outputs['Color'], BlenderMaterials.__getSubsurfaceColor(node_principled))
+                _safe_link(group.links, sep_h_out, com_h_in)
+                _safe_link(group.links, sep_s_out, com_s_in)
+                _safe_link(group.links, sep_v_out, node_multiply.inputs[0])
+                _safe_link(group.links, com_color_out, node_principled.inputs['Base Color'])
+                _safe_link(group.links, com_color_out, BlenderMaterials.__getSubsurfaceColor(node_principled))
                 group.links.new(node_tex_coord.outputs['Object'], node_tex_wave.inputs['Vector'])
                 group.links.new(node_tex_wave.outputs['Fac'], node_color_ramp.inputs['Fac'])
                 group.links.new(node_color_ramp.outputs['Color'], node_multiply.inputs[1])
-                group.links.new(node_multiply.outputs[0], node_com_hsv.inputs['V'])
+                _safe_link(group.links, node_multiply.outputs[0], com_v_in)
                 group.links.new(node_principled.outputs['BSDF'], node_output.inputs[0])
             else:
                 node_diffuse = BlenderMaterials.__nodeDiffuse(group.nodes, 0.0, -242, -23)
